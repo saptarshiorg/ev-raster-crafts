@@ -1,0 +1,528 @@
+#!/usr/bin/env node
+'use strict';
+/**
+ * build-installer.js  --  EV Raster Crafts one-command build + packaging script.
+ * Run:  node build-installer.js
+ *
+ * Pipeline: check tools -> write project -> cargo build -> npm install ->
+ *           bundle bridge + pkg -> dist/EV_Raster_Crafts_Setup.exe -> register with Claude Desktop.
+ * Needs: Node 18+, npm, Rust (cargo), internet access (npm + pkg base binaries).
+ */
+const fs = require('fs');
+const path = require('path');
+const { execSync, spawnSync } = require('child_process');
+
+const ROOT = process.cwd();
+const CORE = path.join(ROOT, 'ev_raster_core');
+const BRIDGE = path.join(ROOT, 'mcp_bridge');
+const PKGDIR = path.join(ROOT, 'installer_build');
+const DIST = path.join(ROOT, 'dist');
+const IS_WIN = process.platform === 'win32';
+const ENGINE_NAME = IS_WIN ? 'ev-raster.exe' : 'ev-raster';
+
+// ---- embedded project sources (base64 so nothing is mangled by copy/paste) ----
+const FILES = {
+  'Cargo.toml': [
+    'W3BhY2thZ2VdCm5hbWUgPSAiZXYtcmFzdGVyIgp2ZXJzaW9uID0gIjAuMS4wIgplZGl0aW9uID0gIjIwMjEiCmRlc2NyaXB0aW9u',
+    'ID0gIkVWIFJhc3RlciBDcmFmdHMgYnkgRVZPUkE6IHVsdHJhLWxpZ2h0d2VpZ2h0IG5hdGl2ZSBSdXN0IHJhc3RlciBjYW52YXMg',
+    'ZW5naW5lIgphdXRob3JzID0gWyJFVk9SQSJdCmxpY2Vuc2UgPSAiTUlUIgoKW1tiaW5dXQpuYW1lID0gImV2LXJhc3RlciIKcGF0',
+    'aCA9ICJzcmMvbWFpbi5ycyIKCltkZXBlbmRlbmNpZXNdCgpbcHJvZmlsZS5yZWxlYXNlXQpvcHQtbGV2ZWwgPSAzCmx0byA9IHRy',
+    'dWUKY29kZWdlbi11bml0cyA9IDEKcGFuaWMgPSAiYWJvcnQiCnN0cmlwID0gdHJ1ZQo='
+  ],
+  'src/main.rs': [
+    'Ly8hIEVWIFJhc3RlciBDcmFmdHMgY29yZSBlbmdpbmUgKGJ5IEVWT1JBKS4KLy8hCi8vISBVc2FnZTogZXYtcmFzdGVyICJjbWQ6',
+    'YXJncztjbWQ6YXJncztyZW5kZXIiCi8vIQovLyEgQ29tbWFuZHM6Ci8vISAgIHNpemU6TiAgICAgICAgICAgICAgICAgICAgICBy',
+    'ZXNldCBjYW52YXMgdG8gTiB4IE4gKDEuLj02NCkKLy8hICAgY29sb3I6PGNvbG9yPiAgICAgICAgICAgICAgIHNldCBwcmltYXJ5',
+    'IGNvbG9yIChoZXggIiNSUkdHQkIiLyIjUkdCIiBvciBhIG5hbWUpCi8vISAgIHBpeGVsOngseVssY29sb3JdICAgICAgICAgICBk',
+    'cmF3IGEgc2luZ2xlIHBpeGVsIChwZW5jaWwpCi8vISAgIGxpbmU6eDAseTAseDEseTFbLGNvbG9yXSAgICBkcmF3IGEgY29udGlu',
+    'dW91cyBzdHJva2UgKGJydXNoLCBCcmVzZW5oYW0pCi8vISAgIGVyYXNlOngseSAgICAgICAgICAgICAgICAgICBvdmVyd3JpdGUg',
+    'YSBwaXhlbCB3aXRoIHRoZSBiYWNrZ3JvdW5kIChlcmFzZXIpCi8vISAgIGZpbGw6eCx5Wyxjb2xvcl0gICAgICAgICAgICA0LXdh',
+    'eSBmbG9vZCBmaWxsIChidWNrZXQpCi8vISAgIHJvdGF0ZTpkZWcgICAgICAgICAgICAgICAgICByb3RhdGUgY2xvY2t3aXNlIGJ5',
+    'IDkwIC8gMTgwIC8gMjcwICgtOTAgPSBsZWZ0IDkwKQovLyEgICBmbGlwOmhvcml6b250YWx8dmVydGljYWwgICAgbWlycm9yIHRo',
+    'ZSBjYW52YXMKLy8hICAgY2xlYXIgICAgICAgICAgICAgICAgICAgICAgIHdpcGUgY2FudmFzIHRvIGJhY2tncm91bmQgKHBhbGV0',
+    'dGUgaXMga2VwdCkKLy8hICAgcmVuZGVyICAgICAgICAgICAgICAgICAgICAgIHByaW50IHRoZSBjYW52YXMgdG8gc3Rkb3V0Cgp1',
+    'c2Ugc3RkOjplbnY7CnVzZSBzdGQ6OnByb2Nlc3M7Cgpjb25zdCBERUZBVUxUX1NJWkU6IHVzaXplID0gMTY7CmNvbnN0IE1BWF9T',
+    'SVpFOiB1c2l6ZSA9IDY0Owpjb25zdCBCQUNLR1JPVU5EOiB1MzIgPSAweDAwRkZfRkZGRjsKY29uc3QgUEFMRVRURV9MSU1JVDog',
+    'dXNpemUgPSAxNjsKCi8vLyBFbW9qaSBwYWxldHRlIHVzZWQgZm9yIHJlbmRlcmluZzsgZWFjaCBwaXhlbCBtYXBzIHRvIHRoZSBu',
+    'ZWFyZXN0IGVudHJ5Lgpjb25zdCBFTU9KSV9QQUxFVFRFOiBbKHUzMiwgJnN0cik7IDldID0gWwogICAgKDB4RkZGRkZGLCAi4pqq',
+    'IiksCiAgICAoMHhGRjAwMDAsICLwn5S0IiksCiAgICAoMHgwMDAwRkYsICLwn5S1IiksCiAgICAoMHgwMDAwMDAsICLimqsiKSwK',
+    'ICAgICgweDAwQzAwMCwgIvCfn6IiKSwKICAgICgweEZGRTAwMCwgIvCfn6EiKSwKICAgICgweEZGOEMwMCwgIvCfn6AiKSwKICAg',
+    'ICgweDgwMDBGRiwgIvCfn6MiKSwKICAgICgweDhCNDUxMywgIvCfn6QiKSwKXTsKCnN0cnVjdCBDYW52YXMgewogICAgd2lkdGg6',
+    'IHVzaXplLAogICAgaGVpZ2h0OiB1c2l6ZSwKICAgIHBpeGVsczogVmVjPFZlYzx1MzI+PiwKICAgIGFjdGl2ZV9jb2xvcjogdTMy',
+    'LAogICAgcGFsZXR0ZV9oaXN0b3J5OiBWZWM8dTMyPiwKfQoKaW1wbCBDYW52YXMgewogICAgZm4gbmV3KHNpemU6IHVzaXplKSAt',
+    'PiBDYW52YXMgewogICAgICAgIENhbnZhcyB7CiAgICAgICAgICAgIHdpZHRoOiBzaXplLAogICAgICAgICAgICBoZWlnaHQ6IHNp',
+    'emUsCiAgICAgICAgICAgIHBpeGVsczogdmVjIVt2ZWMhW0JBQ0tHUk9VTkQ7IHNpemVdOyBzaXplXSwKICAgICAgICAgICAgYWN0',
+    'aXZlX2NvbG9yOiAweDAwMDBfMDAwMCwKICAgICAgICAgICAgcGFsZXR0ZV9oaXN0b3J5OiB2ZWMhWzB4MDAwMF8wMDAwXSwKICAg',
+    'ICAgICB9CiAgICB9CgogICAgZm4gaW5fYm91bmRzKCZzZWxmLCB4OiBpNjQsIHk6IGk2NCkgLT4gYm9vbCB7CiAgICAgICAgeCA+',
+    'PSAwICYmIHkgPj0gMCAmJiAoeCBhcyB1c2l6ZSkgPCBzZWxmLndpZHRoICYmICh5IGFzIHVzaXplKSA8IHNlbGYuaGVpZ2h0CiAg',
+    'ICB9CgogICAgZm4gY2hlY2tfYm91bmRzKCZzZWxmLCB4OiBpNjQsIHk6IGk2NCkgLT4gUmVzdWx0PCh1c2l6ZSwgdXNpemUpLCBT',
+    'dHJpbmc+IHsKICAgICAgICBpZiBzZWxmLmluX2JvdW5kcyh4LCB5KSB7CiAgICAgICAgICAgIE9rKCh4IGFzIHVzaXplLCB5IGFz',
+    'IHVzaXplKSkKICAgICAgICB9IGVsc2UgewogICAgICAgICAgICBFcnIoZm9ybWF0ISgKICAgICAgICAgICAgICAgICJjb29yZGlu',
+    'YXRlICh7fSwge30pIGlzIG91dHNpZGUgdGhlIHt9eHt9IGNhbnZhcyIsCiAgICAgICAgICAgICAgICB4LCB5LCBzZWxmLndpZHRo',
+    'LCBzZWxmLmhlaWdodAogICAgICAgICAgICApKQogICAgICAgIH0KICAgIH0KCiAgICAvLy8gU2V0IHRoZSBwcmltYXJ5IGNvbG9y',
+    'IGFuZCByZW1lbWJlciBpdCAobW9zdCByZWNlbnQgZmlyc3QsIGRlZHVwbGljYXRlZCkuCiAgICBmbiBzZXRfYWN0aXZlX2NvbG9y',
+    'KCZtdXQgc2VsZiwgY29sb3I6IHUzMikgewogICAgICAgIHNlbGYuYWN0aXZlX2NvbG9yID0gY29sb3I7CiAgICAgICAgc2VsZi5w',
+    'YWxldHRlX2hpc3RvcnkucmV0YWluKHxjfCAqYyAhPSBjb2xvcik7CiAgICAgICAgc2VsZi5wYWxldHRlX2hpc3RvcnkuaW5zZXJ0',
+    'KDAsIGNvbG9yKTsKICAgICAgICBzZWxmLnBhbGV0dGVfaGlzdG9yeS50cnVuY2F0ZShQQUxFVFRFX0xJTUlUKTsKICAgIH0KCiAg',
+    'ICBmbiBkcmF3X3BpeGVsKCZtdXQgc2VsZiwgeDogaTY0LCB5OiBpNjQsIGNvbG9yOiB1MzIpIC0+IFJlc3VsdDwoKSwgU3RyaW5n',
+    'PiB7CiAgICAgICAgbGV0ICh1eCwgdXkpID0gc2VsZi5jaGVja19ib3VuZHMoeCwgeSk/OwogICAgICAgIHNlbGYucGl4ZWxzW3V5',
+    'XVt1eF0gPSBjb2xvcjsKICAgICAgICBPaygoKSkKICAgIH0KCiAgICBmbiBlcmFzZV9waXhlbCgmbXV0IHNlbGYsIHg6IGk2NCwg',
+    'eTogaTY0KSAtPiBSZXN1bHQ8KCksIFN0cmluZz4gewogICAgICAgIHNlbGYuZHJhd19waXhlbCh4LCB5LCBCQUNLR1JPVU5EKQog',
+    'ICAgfQoKICAgIC8vLyBCcmVzZW5oYW0gbGluZTogZXZlcnkgY2VsbCBiZXR3ZWVuIHRoZSB0d28gcG9pbnRzIGlzIHBhaW50ZWQu',
+    'CiAgICBmbiBkcmF3X2xpbmUoJm11dCBzZWxmLCB4MDogaTY0LCB5MDogaTY0LCB4MTogaTY0LCB5MTogaTY0LCBjb2xvcjogdTMy',
+    'KSAtPiBSZXN1bHQ8KCksIFN0cmluZz4gewogICAgICAgIHNlbGYuY2hlY2tfYm91bmRzKHgwLCB5MCk/OwogICAgICAgIHNlbGYu',
+    'Y2hlY2tfYm91bmRzKHgxLCB5MSk/OwogICAgICAgIGxldCBkeCA9ICh4MSAtIHgwKS5hYnMoKTsKICAgICAgICBsZXQgZHkgPSAt',
+    'KHkxIC0geTApLmFicygpOwogICAgICAgIGxldCBzeCA9IGlmIHgwIDwgeDEgeyAxIH0gZWxzZSB7IC0xIH07CiAgICAgICAgbGV0',
+    'IHN5ID0gaWYgeTAgPCB5MSB7IDEgfSBlbHNlIHsgLTEgfTsKICAgICAgICBsZXQgbXV0IGVyciA9IGR4ICsgZHk7CiAgICAgICAg',
+    'bGV0IChtdXQgeCwgbXV0IHkpID0gKHgwLCB5MCk7CiAgICAgICAgbG9vcCB7CiAgICAgICAgICAgIHNlbGYuZHJhd19waXhlbCh4',
+    'LCB5LCBjb2xvcik/OwogICAgICAgICAgICBpZiB4ID09IHgxICYmIHkgPT0geTEgewogICAgICAgICAgICAgICAgYnJlYWs7CiAg',
+    'ICAgICAgICAgIH0KICAgICAgICAgICAgbGV0IGUyID0gMiAqIGVycjsKICAgICAgICAgICAgaWYgZTIgPj0gZHkgewogICAgICAg',
+    'ICAgICAgICAgZXJyICs9IGR5OwogICAgICAgICAgICAgICAgeCArPSBzeDsKICAgICAgICAgICAgfQogICAgICAgICAgICBpZiBl',
+    'MiA8PSBkeCB7CiAgICAgICAgICAgICAgICBlcnIgKz0gZHg7CiAgICAgICAgICAgICAgICB5ICs9IHN5OwogICAgICAgICAgICB9',
+    'CiAgICAgICAgfQogICAgICAgIE9rKCgpKQogICAgfQoKICAgIC8vLyBTdGFjay1iYXNlZCwgNC1jb25uZWN0ZWQgZmxvb2QgZmls',
+    'bCB3aXRoIGJvdW5kYXJ5IGNoZWNrcy4KICAgIGZuIGZsb29kX2ZpbGwoJm11dCBzZWxmLCB4OiBpNjQsIHk6IGk2NCwgY29sb3I6',
+    'IHUzMikgLT4gUmVzdWx0PCgpLCBTdHJpbmc+IHsKICAgICAgICBsZXQgKHN4LCBzeSkgPSBzZWxmLmNoZWNrX2JvdW5kcyh4LCB5',
+    'KT87CiAgICAgICAgbGV0IHRhcmdldCA9IHNlbGYucGl4ZWxzW3N5XVtzeF07CiAgICAgICAgaWYgdGFyZ2V0ID09IGNvbG9yIHsK',
+    'ICAgICAgICAgICAgcmV0dXJuIE9rKCgpKTsKICAgICAgICB9CiAgICAgICAgbGV0IG11dCBzdGFjazogVmVjPCh1c2l6ZSwgdXNp',
+    'emUpPiA9IHZlYyFbKHN4LCBzeSldOwogICAgICAgIHdoaWxlIGxldCBTb21lKChjeCwgY3kpKSA9IHN0YWNrLnBvcCgpIHsKICAg',
+    'ICAgICAgICAgaWYgc2VsZi5waXhlbHNbY3ldW2N4XSAhPSB0YXJnZXQgewogICAgICAgICAgICAgICAgY29udGludWU7CiAgICAg',
+    'ICAgICAgIH0KICAgICAgICAgICAgc2VsZi5waXhlbHNbY3ldW2N4XSA9IGNvbG9yOwogICAgICAgICAgICBpZiBjeCA+IDAgewog',
+    'ICAgICAgICAgICAgICAgc3RhY2sucHVzaCgoY3ggLSAxLCBjeSkpOwogICAgICAgICAgICB9CiAgICAgICAgICAgIGlmIGN4ICsg',
+    'MSA8IHNlbGYud2lkdGggewogICAgICAgICAgICAgICAgc3RhY2sucHVzaCgoY3ggKyAxLCBjeSkpOwogICAgICAgICAgICB9CiAg',
+    'ICAgICAgICAgIGlmIGN5ID4gMCB7CiAgICAgICAgICAgICAgICBzdGFjay5wdXNoKChjeCwgY3kgLSAxKSk7CiAgICAgICAgICAg',
+    'IH0KICAgICAgICAgICAgaWYgY3kgKyAxIDwgc2VsZi5oZWlnaHQgewogICAgICAgICAgICAgICAgc3RhY2sucHVzaCgoY3gsIGN5',
+    'ICsgMSkpOwogICAgICAgICAgICB9CiAgICAgICAgfQogICAgICAgIE9rKCgpKQogICAgfQoKICAgIC8vLyBSb3RhdGUgY2xvY2t3',
+    'aXNlLiBBY2NlcHRzIDkwLCAxODAsIDI3MCBhbmQgdGhlaXIgbmVnYXRpdmVzIC8gbXVsdGlwbGVzIG9mIDM2MC4KICAgIGZuIHJv',
+    'dGF0ZV9jYW52YXMoJm11dCBzZWxmLCBkZWdyZWVzOiBpNjQpIC0+IFJlc3VsdDwoKSwgU3RyaW5nPiB7CiAgICAgICAgbGV0IG5v',
+    'cm1hbGl6ZWQgPSBkZWdyZWVzLnJlbV9ldWNsaWQoMzYwKTsKICAgICAgICBtYXRjaCBub3JtYWxpemVkIHsKICAgICAgICAgICAg',
+    'MCA9PiB7fQogICAgICAgICAgICA5MCA9PiB7CiAgICAgICAgICAgICAgICBsZXQgKHcsIGgpID0gKHNlbGYud2lkdGgsIHNlbGYu',
+    'aGVpZ2h0KTsKICAgICAgICAgICAgICAgIGxldCBtdXQgb3V0ID0gdmVjIVt2ZWMhW0JBQ0tHUk9VTkQ7IGhdOyB3XTsKICAgICAg',
+    'ICAgICAgICAgIGZvciByIGluIDAuLncgewogICAgICAgICAgICAgICAgICAgIGZvciBjIGluIDAuLmggewogICAgICAgICAgICAg',
+    'ICAgICAgICAgICBvdXRbcl1bY10gPSBzZWxmLnBpeGVsc1toIC0gMSAtIGNdW3JdOwogICAgICAgICAgICAgICAgICAgIH0KICAg',
+    'ICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIHNlbGYucGl4ZWxzID0gb3V0OwogICAgICAgICAgICAgICAgc2VsZi53aWR0',
+    'aCA9IGg7CiAgICAgICAgICAgICAgICBzZWxmLmhlaWdodCA9IHc7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgMTgwID0+IHsK',
+    'ICAgICAgICAgICAgICAgIHNlbGYucGl4ZWxzLnJldmVyc2UoKTsKICAgICAgICAgICAgICAgIGZvciByb3cgaW4gc2VsZi5waXhl',
+    'bHMuaXRlcl9tdXQoKSB7CiAgICAgICAgICAgICAgICAgICAgcm93LnJldmVyc2UoKTsKICAgICAgICAgICAgICAgIH0KICAgICAg',
+    'ICAgICAgfQogICAgICAgICAgICAyNzAgPT4gewogICAgICAgICAgICAgICAgbGV0ICh3LCBoKSA9IChzZWxmLndpZHRoLCBzZWxm',
+    'LmhlaWdodCk7CiAgICAgICAgICAgICAgICBsZXQgbXV0IG91dCA9IHZlYyFbdmVjIVtCQUNLR1JPVU5EOyBoXTsgd107CiAgICAg',
+    'ICAgICAgICAgICBmb3IgciBpbiAwLi53IHsKICAgICAgICAgICAgICAgICAgICBmb3IgYyBpbiAwLi5oIHsKICAgICAgICAgICAg',
+    'ICAgICAgICAgICAgb3V0W3JdW2NdID0gc2VsZi5waXhlbHNbY11bdyAtIDEgLSByXTsKICAgICAgICAgICAgICAgICAgICB9CiAg',
+    'ICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBzZWxmLnBpeGVscyA9IG91dDsKICAgICAgICAgICAgICAgIHNlbGYud2lk',
+    'dGggPSBoOwogICAgICAgICAgICAgICAgc2VsZi5oZWlnaHQgPSB3OwogICAgICAgICAgICB9CiAgICAgICAgICAgIF8gPT4gewog',
+    'ICAgICAgICAgICAgICAgcmV0dXJuIEVycihmb3JtYXQhKAogICAgICAgICAgICAgICAgICAgICJyb3RhdGlvbiBtdXN0IGJlIGEg',
+    'bXVsdGlwbGUgb2YgOTAgZGVncmVlcywgZ290IHt9IiwKICAgICAgICAgICAgICAgICAgICBkZWdyZWVzCiAgICAgICAgICAgICAg',
+    'ICApKQogICAgICAgICAgICB9CiAgICAgICAgfQogICAgICAgIE9rKCgpKQogICAgfQoKICAgIGZuIGZsaXBfY2FudmFzKCZtdXQg',
+    'c2VsZiwgYXhpczogJnN0cikgLT4gUmVzdWx0PCgpLCBTdHJpbmc+IHsKICAgICAgICBtYXRjaCBheGlzIHsKICAgICAgICAgICAg',
+    'Imhvcml6b250YWwiID0+IHsKICAgICAgICAgICAgICAgIGZvciByb3cgaW4gc2VsZi5waXhlbHMuaXRlcl9tdXQoKSB7CiAgICAg',
+    'ICAgICAgICAgICAgICAgcm93LnJldmVyc2UoKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIE9rKCgpKQogICAg',
+    'ICAgICAgICB9CiAgICAgICAgICAgICJ2ZXJ0aWNhbCIgPT4gewogICAgICAgICAgICAgICAgc2VsZi5waXhlbHMucmV2ZXJzZSgp',
+    'OwogICAgICAgICAgICAgICAgT2soKCkpCiAgICAgICAgICAgIH0KICAgICAgICAgICAgb3RoZXIgPT4gRXJyKGZvcm1hdCEoCiAg',
+    'ICAgICAgICAgICAgICAiZmxpcCBheGlzIG11c3QgYmUgJ2hvcml6b250YWwnIG9yICd2ZXJ0aWNhbCcsIGdvdCAne30nIiwKICAg',
+    'ICAgICAgICAgICAgIG90aGVyCiAgICAgICAgICAgICkpLAogICAgICAgIH0KICAgIH0KCiAgICBmbiBjbGVhcigmbXV0IHNlbGYp',
+    'IHsKICAgICAgICBmb3Igcm93IGluIHNlbGYucGl4ZWxzLml0ZXJfbXV0KCkgewogICAgICAgICAgICBmb3IgY2VsbCBpbiByb3cu',
+    'aXRlcl9tdXQoKSB7CiAgICAgICAgICAgICAgICAqY2VsbCA9IEJBQ0tHUk9VTkQ7CiAgICAgICAgICAgIH0KICAgICAgICB9CiAg',
+    'ICB9CgogICAgZm4gcmVuZGVyKCZzZWxmKSAtPiBTdHJpbmcgewogICAgICAgIGxldCBtdXQgb3V0ID0gU3RyaW5nOjpuZXcoKTsK',
+    'ICAgICAgICBmb3Igcm93IGluICZzZWxmLnBpeGVscyB7CiAgICAgICAgICAgIGZvciAmY29sb3IgaW4gcm93IHsKICAgICAgICAg',
+    'ICAgICAgIG91dC5wdXNoX3N0cihuZWFyZXN0X2Vtb2ppKGNvbG9yKSk7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgb3V0LnB1',
+    'c2goJ1xuJyk7CiAgICAgICAgfQogICAgICAgIG91dC5wdXNoKCdcbicpOwogICAgICAgIG91dC5wdXNoX3N0cigmZm9ybWF0ISgK',
+    'ICAgICAgICAgICAgIkNhbnZhczoge314e30gfCBBY3RpdmUgY29sb3I6IHt9XG4iLAogICAgICAgICAgICBzZWxmLndpZHRoLAog',
+    'ICAgICAgICAgICBzZWxmLmhlaWdodCwKICAgICAgICAgICAgaGV4X3N0cmluZyhzZWxmLmFjdGl2ZV9jb2xvcikKICAgICAgICAp',
+    'KTsKICAgICAgICBsZXQgaGlzdG9yeTogVmVjPFN0cmluZz4gPSBzZWxmLnBhbGV0dGVfaGlzdG9yeS5pdGVyKCkubWFwKHxjfCBo',
+    'ZXhfc3RyaW5nKCpjKSkuY29sbGVjdCgpOwogICAgICAgIG91dC5wdXNoX3N0cigmZm9ybWF0ISgiUGFsZXR0ZSBoaXN0b3J5OiB7',
+    'fVxuIiwgaGlzdG9yeS5qb2luKCIgIikpKTsKICAgICAgICBvdXQKICAgIH0KfQoKZm4gaGV4X3N0cmluZyhjb2xvcjogdTMyKSAt',
+    'PiBTdHJpbmcgewogICAgZm9ybWF0ISgiI3s6MDZYfSIsIGNvbG9yICYgMHgwMEZGX0ZGRkYpCn0KCmZuIG5lYXJlc3RfZW1vamko',
+    'Y29sb3I6IHUzMikgLT4gJidzdGF0aWMgc3RyIHsKICAgIGxldCAociwgZywgYikgPSAoCiAgICAgICAgKChjb2xvciA+PiAxNikg',
+    'JiAweEZGKSBhcyBpNjQsCiAgICAgICAgKChjb2xvciA+PiA4KSAmIDB4RkYpIGFzIGk2NCwKICAgICAgICAoY29sb3IgJiAweEZG',
+    'KSBhcyBpNjQsCiAgICApOwogICAgbGV0IG11dCBiZXN0ID0gRU1PSklfUEFMRVRURVswXS4xOwogICAgbGV0IG11dCBiZXN0X2Rp',
+    'c3QgPSBpNjQ6Ok1BWDsKICAgIGZvciAocmVmX2NvbG9yLCBlbW9qaSkgaW4gRU1PSklfUEFMRVRURS5pdGVyKCkgewogICAgICAg',
+    'IGxldCAocnIsIHJnLCByYikgPSAoCiAgICAgICAgICAgICgocmVmX2NvbG9yID4+IDE2KSAmIDB4RkYpIGFzIGk2NCwKICAgICAg',
+    'ICAgICAgKChyZWZfY29sb3IgPj4gOCkgJiAweEZGKSBhcyBpNjQsCiAgICAgICAgICAgIChyZWZfY29sb3IgJiAweEZGKSBhcyBp',
+    'NjQsCiAgICAgICAgKTsKICAgICAgICBsZXQgZGlzdCA9IChyIC0gcnIpLnBvdygyKSArIChnIC0gcmcpLnBvdygyKSArIChiIC0g',
+    'cmIpLnBvdygyKTsKICAgICAgICBpZiBkaXN0IDwgYmVzdF9kaXN0IHsKICAgICAgICAgICAgYmVzdF9kaXN0ID0gZGlzdDsKICAg',
+    'ICAgICAgICAgYmVzdCA9IGVtb2ppOwogICAgICAgIH0KICAgIH0KICAgIGJlc3QKfQoKZm4gcGFyc2VfY29sb3IoaW5wdXQ6ICZz',
+    'dHIpIC0+IFJlc3VsdDx1MzIsIFN0cmluZz4gewogICAgbGV0IHMgPSBpbnB1dC50cmltKCkudG9fbG93ZXJjYXNlKCk7CiAgICBs',
+    'ZXQgbmFtZWQgPSBtYXRjaCBzLmFzX3N0cigpIHsKICAgICAgICAid2hpdGUiID0+IFNvbWUoMHhGRkZGRkYpLAogICAgICAgICJi',
+    'bGFjayIgPT4gU29tZSgweDAwMDAwMCksCiAgICAgICAgInJlZCIgPT4gU29tZSgweEZGMDAwMCksCiAgICAgICAgImJsdWUiID0+',
+    'IFNvbWUoMHgwMDAwRkYpLAogICAgICAgICJncmVlbiIgPT4gU29tZSgweDAwQzAwMCksCiAgICAgICAgInllbGxvdyIgPT4gU29t',
+    'ZSgweEZGRTAwMCksCiAgICAgICAgIm9yYW5nZSIgPT4gU29tZSgweEZGOEMwMCksCiAgICAgICAgInB1cnBsZSIgPT4gU29tZSgw',
+    'eDgwMDBGRiksCiAgICAgICAgImJyb3duIiA9PiBTb21lKDB4OEI0NTEzKSwKICAgICAgICBfID0+IE5vbmUsCiAgICB9OwogICAg',
+    'aWYgbGV0IFNvbWUoYykgPSBuYW1lZCB7CiAgICAgICAgcmV0dXJuIE9rKGMpOwogICAgfQogICAgbGV0IGhleCA9IHMudHJpbV9z',
+    'dGFydF9tYXRjaGVzKCcjJyk7CiAgICBsZXQgZXhwYW5kZWQ6IFN0cmluZyA9IG1hdGNoIGhleC5sZW4oKSB7CiAgICAgICAgMyA9',
+    'PiBoZXguY2hhcnMoKS5mbGF0X21hcCh8Y3wgW2MsIGNdKS5jb2xsZWN0KCksCiAgICAgICAgNiA9PiBoZXgudG9fc3RyaW5nKCks',
+    'CiAgICAgICAgXyA9PiByZXR1cm4gRXJyKGZvcm1hdCEoImludmFsaWQgY29sb3IgJ3t9JyIsIGlucHV0KSksCiAgICB9OwogICAg',
+    'dTMyOjpmcm9tX3N0cl9yYWRpeCgmZXhwYW5kZWQsIDE2KS5tYXBfZXJyKHxffCBmb3JtYXQhKCJpbnZhbGlkIGNvbG9yICd7fSci',
+    'LCBpbnB1dCkpCn0KCmZuIHBhcnNlX2ludChpbnB1dDogJnN0cikgLT4gUmVzdWx0PGk2NCwgU3RyaW5nPiB7CiAgICBpbnB1dAog',
+    'ICAgICAgIC50cmltKCkKICAgICAgICAucGFyc2U6OjxpNjQ+KCkKICAgICAgICAubWFwX2Vycih8X3wgZm9ybWF0ISgiaW52YWxp',
+    'ZCBpbnRlZ2VyICd7fSciLCBpbnB1dCkpCn0KCmZuIHNwbGl0X2FyZ3MoYXJnczogJnN0cikgLT4gVmVjPCZzdHI+IHsKICAgIGlm',
+    'IGFyZ3MudHJpbSgpLmlzX2VtcHR5KCkgewogICAgICAgIFZlYzo6bmV3KCkKICAgIH0gZWxzZSB7CiAgICAgICAgYXJncy5zcGxp',
+    'dCgnLCcpLm1hcCh8YXwgYS50cmltKCkpLmNvbGxlY3QoKQogICAgfQp9CgovLy8gUmVzb2x2ZSBhbiBvcHRpb25hbCB0cmFpbGlu',
+    'ZyBjb2xvciBhcmd1bWVudDsgZXhwbGljaXQgY29sb3JzIGJlY29tZSB0aGUgcHJpbWFyeSBjb2xvci4KZm4gcmVzb2x2ZV9jb2xv',
+    'cihjYW52YXM6ICZtdXQgQ2FudmFzLCBhcmc6IE9wdGlvbjwmJnN0cj4pIC0+IFJlc3VsdDx1MzIsIFN0cmluZz4gewogICAgbWF0',
+    'Y2ggYXJnIHsKICAgICAgICBTb21lKHRleHQpID0+IHsKICAgICAgICAgICAgbGV0IGNvbG9yID0gcGFyc2VfY29sb3IodGV4dCk/',
+    'OwogICAgICAgICAgICBjYW52YXMuc2V0X2FjdGl2ZV9jb2xvcihjb2xvcik7CiAgICAgICAgICAgIE9rKGNvbG9yKQogICAgICAg',
+    'IH0KICAgICAgICBOb25lID0+IE9rKGNhbnZhcy5hY3RpdmVfY29sb3IpLAogICAgfQp9CgpmbiBleHBlY3RfbGVuKGNtZDogJnN0',
+    'ciwgcGFydHM6ICZbJnN0cl0sIG1pbjogdXNpemUsIG1heDogdXNpemUpIC0+IFJlc3VsdDwoKSwgU3RyaW5nPiB7CiAgICBpZiBw',
+    'YXJ0cy5sZW4oKSA8IG1pbiB8fCBwYXJ0cy5sZW4oKSA+IG1heCB7CiAgICAgICAgRXJyKGZvcm1hdCEoCiAgICAgICAgICAgICJj',
+    'b21tYW5kICd7fScgZXhwZWN0cyB7fS17fSBhcmd1bWVudHMsIGdvdCB7fSIsCiAgICAgICAgICAgIGNtZCwKICAgICAgICAgICAg',
+    'bWluLAogICAgICAgICAgICBtYXgsCiAgICAgICAgICAgIHBhcnRzLmxlbigpCiAgICAgICAgKSkKICAgIH0gZWxzZSB7CiAgICAg',
+    'ICAgT2soKCkpCiAgICB9Cn0KCi8vLyBFeGVjdXRlIGEgImNtZDphcmdzO2NtZDphcmdzIiBwcm9ncmFtLiBSZXR1cm5zIHRoZSBy',
+    'ZW5kZXJlZCBvdXRwdXQgaWYgYHJlbmRlcmAgcmFuLgpmbiBydW5fcHJvZ3JhbShwcm9ncmFtOiAmc3RyKSAtPiBSZXN1bHQ8T3B0',
+    'aW9uPFN0cmluZz4sIFN0cmluZz4gewogICAgbGV0IG11dCBjYW52YXMgPSBDYW52YXM6Om5ldyhERUZBVUxUX1NJWkUpOwogICAg',
+    'bGV0IG11dCBvdXRwdXQ6IE9wdGlvbjxTdHJpbmc+ID0gTm9uZTsKCiAgICBmb3IgdG9rZW4gaW4gcHJvZ3JhbS5zcGxpdCgnOycp',
+    'IHsKICAgICAgICBsZXQgdG9rZW4gPSB0b2tlbi50cmltKCk7CiAgICAgICAgaWYgdG9rZW4uaXNfZW1wdHkoKSB7CiAgICAgICAg',
+    'ICAgIGNvbnRpbnVlOwogICAgICAgIH0KICAgICAgICBsZXQgKGNtZCwgYXJncykgPSBtYXRjaCB0b2tlbi5maW5kKCc6Jykgewog',
+    'ICAgICAgICAgICBTb21lKGkpID0+ICh0b2tlblsuLmldLnRyaW0oKS50b19sb3dlcmNhc2UoKSwgdG9rZW5baSArIDEuLl0udHJp',
+    'bSgpKSwKICAgICAgICAgICAgTm9uZSA9PiAodG9rZW4udG9fbG93ZXJjYXNlKCksICIiKSwKICAgICAgICB9OwogICAgICAgIGxl',
+    'dCBwYXJ0cyA9IHNwbGl0X2FyZ3MoYXJncyk7CgogICAgICAgIG1hdGNoIGNtZC5hc19zdHIoKSB7CiAgICAgICAgICAgICJzaXpl',
+    'IiA9PiB7CiAgICAgICAgICAgICAgICBleHBlY3RfbGVuKCJzaXplIiwgJnBhcnRzLCAxLCAxKT87CiAgICAgICAgICAgICAgICBs',
+    'ZXQgbiA9IHBhcnNlX2ludChwYXJ0c1swXSk/OwogICAgICAgICAgICAgICAgaWYgbiA8IDEgfHwgbiBhcyB1c2l6ZSA+IE1BWF9T',
+    'SVpFIHsKICAgICAgICAgICAgICAgICAgICByZXR1cm4gRXJyKGZvcm1hdCEoInNpemUgbXVzdCBiZSBiZXR3ZWVuIDEgYW5kIHt9',
+    'IiwgTUFYX1NJWkUpKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIGxldCBrZWVwX2NvbG9yID0gY2FudmFzLmFj',
+    'dGl2ZV9jb2xvcjsKICAgICAgICAgICAgICAgIGxldCBrZWVwX2hpc3RvcnkgPSBjYW52YXMucGFsZXR0ZV9oaXN0b3J5LmNsb25l',
+    'KCk7CiAgICAgICAgICAgICAgICBjYW52YXMgPSBDYW52YXM6Om5ldyhuIGFzIHVzaXplKTsKICAgICAgICAgICAgICAgIGNhbnZh',
+    'cy5hY3RpdmVfY29sb3IgPSBrZWVwX2NvbG9yOwogICAgICAgICAgICAgICAgY2FudmFzLnBhbGV0dGVfaGlzdG9yeSA9IGtlZXBf',
+    'aGlzdG9yeTsKICAgICAgICAgICAgfQogICAgICAgICAgICAiY29sb3IiID0+IHsKICAgICAgICAgICAgICAgIGV4cGVjdF9sZW4o',
+    'ImNvbG9yIiwgJnBhcnRzLCAxLCAxKT87CiAgICAgICAgICAgICAgICBsZXQgY29sb3IgPSBwYXJzZV9jb2xvcihwYXJ0c1swXSk/',
+    'OwogICAgICAgICAgICAgICAgY2FudmFzLnNldF9hY3RpdmVfY29sb3IoY29sb3IpOwogICAgICAgICAgICB9CiAgICAgICAgICAg',
+    'ICJwaXhlbCIgPT4gewogICAgICAgICAgICAgICAgZXhwZWN0X2xlbigicGl4ZWwiLCAmcGFydHMsIDIsIDMpPzsKICAgICAgICAg',
+    'ICAgICAgIGxldCAoeCwgeSkgPSAocGFyc2VfaW50KHBhcnRzWzBdKT8sIHBhcnNlX2ludChwYXJ0c1sxXSk/KTsKICAgICAgICAg',
+    'ICAgICAgIGxldCBjb2xvciA9IHJlc29sdmVfY29sb3IoJm11dCBjYW52YXMsIHBhcnRzLmdldCgyKSk/OwogICAgICAgICAgICAg',
+    'ICAgY2FudmFzLmRyYXdfcGl4ZWwoeCwgeSwgY29sb3IpPzsKICAgICAgICAgICAgfQogICAgICAgICAgICAibGluZSIgPT4gewog',
+    'ICAgICAgICAgICAgICAgZXhwZWN0X2xlbigibGluZSIsICZwYXJ0cywgNCwgNSk/OwogICAgICAgICAgICAgICAgbGV0ICh4MCwg',
+    'eTApID0gKHBhcnNlX2ludChwYXJ0c1swXSk/LCBwYXJzZV9pbnQocGFydHNbMV0pPyk7CiAgICAgICAgICAgICAgICBsZXQgKHgx',
+    'LCB5MSkgPSAocGFyc2VfaW50KHBhcnRzWzJdKT8sIHBhcnNlX2ludChwYXJ0c1szXSk/KTsKICAgICAgICAgICAgICAgIGxldCBj',
+    'b2xvciA9IHJlc29sdmVfY29sb3IoJm11dCBjYW52YXMsIHBhcnRzLmdldCg0KSk/OwogICAgICAgICAgICAgICAgY2FudmFzLmRy',
+    'YXdfbGluZSh4MCwgeTAsIHgxLCB5MSwgY29sb3IpPzsKICAgICAgICAgICAgfQogICAgICAgICAgICAiZXJhc2UiID0+IHsKICAg',
+    'ICAgICAgICAgICAgIGV4cGVjdF9sZW4oImVyYXNlIiwgJnBhcnRzLCAyLCAyKT87CiAgICAgICAgICAgICAgICBsZXQgKHgsIHkp',
+    'ID0gKHBhcnNlX2ludChwYXJ0c1swXSk/LCBwYXJzZV9pbnQocGFydHNbMV0pPyk7CiAgICAgICAgICAgICAgICBjYW52YXMuZXJh',
+    'c2VfcGl4ZWwoeCwgeSk/OwogICAgICAgICAgICB9CiAgICAgICAgICAgICJmaWxsIiA9PiB7CiAgICAgICAgICAgICAgICBleHBl',
+    'Y3RfbGVuKCJmaWxsIiwgJnBhcnRzLCAyLCAzKT87CiAgICAgICAgICAgICAgICBsZXQgKHgsIHkpID0gKHBhcnNlX2ludChwYXJ0',
+    'c1swXSk/LCBwYXJzZV9pbnQocGFydHNbMV0pPyk7CiAgICAgICAgICAgICAgICBsZXQgY29sb3IgPSByZXNvbHZlX2NvbG9yKCZt',
+    'dXQgY2FudmFzLCBwYXJ0cy5nZXQoMikpPzsKICAgICAgICAgICAgICAgIGNhbnZhcy5mbG9vZF9maWxsKHgsIHksIGNvbG9yKT87',
+    'CiAgICAgICAgICAgIH0KICAgICAgICAgICAgInJvdGF0ZSIgPT4gewogICAgICAgICAgICAgICAgZXhwZWN0X2xlbigicm90YXRl',
+    'IiwgJnBhcnRzLCAxLCAxKT87CiAgICAgICAgICAgICAgICBjYW52YXMucm90YXRlX2NhbnZhcyhwYXJzZV9pbnQocGFydHNbMF0p',
+    'Pyk/OwogICAgICAgICAgICB9CiAgICAgICAgICAgICJmbGlwIiA9PiB7CiAgICAgICAgICAgICAgICBleHBlY3RfbGVuKCJmbGlw',
+    'IiwgJnBhcnRzLCAxLCAxKT87CiAgICAgICAgICAgICAgICBjYW52YXMuZmxpcF9jYW52YXMoJnBhcnRzWzBdLnRvX2xvd2VyY2Fz',
+    'ZSgpKT87CiAgICAgICAgICAgIH0KICAgICAgICAgICAgImNsZWFyIiA9PiB7CiAgICAgICAgICAgICAgICBjYW52YXMuY2xlYXIo',
+    'KTsKICAgICAgICAgICAgfQogICAgICAgICAgICAicmVuZGVyIiA9PiB7CiAgICAgICAgICAgICAgICBvdXRwdXQgPSBTb21lKGNh',
+    'bnZhcy5yZW5kZXIoKSk7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgb3RoZXIgPT4gcmV0dXJuIEVycihmb3JtYXQhKCJ1bmtu',
+    'b3duIGNvbW1hbmQgJ3t9JyIsIG90aGVyKSksCiAgICAgICAgfQogICAgfQogICAgT2sob3V0cHV0KQp9CgpmbiBtYWluKCkgewog',
+    'ICAgbGV0IGFyZ3M6IFZlYzxTdHJpbmc+ID0gZW52OjphcmdzKCkuc2tpcCgxKS5jb2xsZWN0KCk7CiAgICBpZiBhcmdzLmlzX2Vt',
+    'cHR5KCkgewogICAgICAgIGVwcmludGxuISgidXNhZ2U6IGV2LXJhc3RlciBcImNtZDphcmdzO2NtZDphcmdzO3JlbmRlclwiIik7',
+    'CiAgICAgICAgcHJvY2Vzczo6ZXhpdCg2NCk7CiAgICB9CiAgICBsZXQgcHJvZ3JhbSA9IGFyZ3Muam9pbigiICIpOwogICAgbWF0',
+    'Y2ggcnVuX3Byb2dyYW0oJnByb2dyYW0pIHsKICAgICAgICBPayhTb21lKHJlbmRlcmVkKSkgPT4gcHJpbnQhKCJ7fSIsIHJlbmRl',
+    'cmVkKSwKICAgICAgICBPayhOb25lKSA9PiB7fQogICAgICAgIEVycihtZXNzYWdlKSA9PiB7CiAgICAgICAgICAgIGVwcmludGxu',
+    'ISgiZXYtcmFzdGVyIGVycm9yOiB7fSIsIG1lc3NhZ2UpOwogICAgICAgICAgICBwcm9jZXNzOjpleGl0KDIpOwogICAgICAgIH0K',
+    'ICAgIH0KfQo='
+  ],
+  'package.json': [
+    'ewogICJuYW1lIjogImV2LXJhc3Rlci1tY3AiLAogICJ2ZXJzaW9uIjogIjAuMS4wIiwKICAiZGVzY3JpcHRpb24iOiAiRVYgUmFz',
+    'dGVyIENyYWZ0cyBieSBFVk9SQTogTUNQIHN0ZGlvIGJyaWRnZSBmb3IgdGhlIG5hdGl2ZSBSdXN0IHJhc3RlciBjYW52YXMgZW5n',
+    'aW5lIiwKICAiYXV0aG9yIjogIkVWT1JBIiwKICAidHlwZSI6ICJtb2R1bGUiLAogICJtYWluIjogImluZGV4LmpzIiwKICAibGlj',
+    'ZW5zZSI6ICJNSVQiLAogICJzY3JpcHRzIjogewogICAgImJ1aWxkIjogImNhcmdvIGJ1aWxkIC0tcmVsZWFzZSIsCiAgICAic3Rh',
+    'cnQiOiAibm9kZSBpbmRleC5qcyIKICB9LAogICJkZXBlbmRlbmNpZXMiOiB7CiAgICAiQG1vZGVsY29udGV4dHByb3RvY29sL3Nk',
+    'ayI6ICJeMS4wLjAiLAogICAgInpvZCI6ICJeMy4yMy44IgogIH0KfQo='
+  ],
+  'index.js': [
+    'aW1wb3J0IHsgTWNwU2VydmVyIH0gZnJvbSAiQG1vZGVsY29udGV4dHByb3RvY29sL3Nkay9zZXJ2ZXIvbWNwLmpzIjsKaW1wb3J0',
+    'IHsgU3RkaW9TZXJ2ZXJUcmFuc3BvcnQgfSBmcm9tICJAbW9kZWxjb250ZXh0cHJvdG9jb2wvc2RrL3NlcnZlci9zdGRpby5qcyI7',
+    'CmltcG9ydCB7IGV4ZWNGaWxlIH0gZnJvbSAibm9kZTpjaGlsZF9wcm9jZXNzIjsKaW1wb3J0IHsgZXhpc3RzU3luYyB9IGZyb20g',
+    'Im5vZGU6ZnMiOwppbXBvcnQgeyBkaXJuYW1lLCBqb2luIH0gZnJvbSAibm9kZTpwYXRoIjsKaW1wb3J0IHsgZmlsZVVSTFRvUGF0',
+    'aCB9IGZyb20gIm5vZGU6dXJsIjsKaW1wb3J0IHsgcHJvbWlzaWZ5IH0gZnJvbSAibm9kZTp1dGlsIjsKaW1wb3J0IHsgeiB9IGZy',
+    'b20gInpvZCI7Cgpjb25zdCBleGVjRmlsZUFzeW5jID0gcHJvbWlzaWZ5KGV4ZWNGaWxlKTsKCmNvbnN0IF9fZGlybmFtZSA9IGRp',
+    'cm5hbWUoZmlsZVVSTFRvUGF0aChpbXBvcnQubWV0YS51cmwpKTsKY29uc3QgQklOQVJZX05BTUUgPSBwcm9jZXNzLnBsYXRmb3Jt',
+    'ID09PSAid2luMzIiID8gImV2LXJhc3Rlci5leGUiIDogImV2LXJhc3RlciI7CmNvbnN0IEJJTkFSWV9QQVRIID0gcHJvY2Vzcy5l',
+    'bnYuRVZfUkFTVEVSX0JJTiA/PyBqb2luKF9fZGlybmFtZSwgInRhcmdldCIsICJyZWxlYXNlIiwgQklOQVJZX05BTUUpOwoKLy8g',
+    'Q2FudmFzIGVkZ2UgbGVuZ3RoOyBtdXN0IHN0YXkgd2l0aGluIHRoZSBSdXN0IGVuZ2luZSdzIDEuLj02NCByYW5nZS4KY29uc3Qg',
+    'cGFyc2VkU2l6ZSA9IE51bWJlci5wYXJzZUludChwcm9jZXNzLmVudi5FVl9SQVNURVJfU0laRSA/PyAiMTYiLCAxMCk7CmNvbnN0',
+    'IENBTlZBU19TSVpFID0gTnVtYmVyLmlzSW50ZWdlcihwYXJzZWRTaXplKSAmJiBwYXJzZWRTaXplID49IDEgJiYgcGFyc2VkU2l6',
+    'ZSA8PSA2NCA/IHBhcnNlZFNpemUgOiAxNjsKY29uc3QgTUFYX0lOREVYID0gQ0FOVkFTX1NJWkUgLSAxOwoKLy8gQnVmZmVyZWQg',
+    'dG9vbC1jYWxsIGhpc3RvcnksIHN0b3JlZCBhcyBjb21wYWN0IGVuZ2luZSBjb21tYW5kcyAoImNtZDphcmdzIikuCmxldCBoaXN0',
+    'b3J5ID0gW2BzaXplOiR7Q0FOVkFTX1NJWkV9YF07CgpmdW5jdGlvbiByZXNldEhpc3RvcnkoKSB7CiAgaGlzdG9yeSA9IFtgc2l6',
+    'ZToke0NBTlZBU19TSVpFfWBdOwp9CgovKioKICogU2VyaWFsaXplIHRoZSB3aG9sZSBoaXN0b3J5IGludG8gdGhlIGNvbXBhY3Qg',
+    'ImNtZDphcmdzO2NtZDphcmdzIiB3aXJlIGZvcm1hdC4KICogQ29tcGFjdGlvbjogcmVkdW5kYW50IGNvbnNlY3V0aXZlIGNvbG9y',
+    'IHNlbGVjdGlvbnMgYXJlIGNvbGxhcHNlZCwgc28gdGhlCiAqIHJ1bnRpbWUgYXJndW1lbnQgc3RheXMgc21hbGwgZXZlbiBhZnRl',
+    'ciBsb25nIHNlc3Npb25zLgogKi8KZnVuY3Rpb24gc2VyaWFsaXplSGlzdG9yeShleHRyYSA9IFtdKSB7CiAgY29uc3QgY29tcGFj',
+    'dCA9IFtdOwogIGZvciAoY29uc3QgY29tbWFuZCBvZiBbLi4uaGlzdG9yeSwgLi4uZXh0cmFdKSB7CiAgICBjb25zdCBsYXN0ID0g',
+    'Y29tcGFjdFtjb21wYWN0Lmxlbmd0aCAtIDFdOwogICAgaWYgKGNvbW1hbmQuc3RhcnRzV2l0aCgiY29sb3I6IikgJiYgbGFzdCA9',
+    'PT0gY29tbWFuZCkgY29udGludWU7CiAgICBjb21wYWN0LnB1c2goY29tbWFuZCk7CiAgfQogIHJldHVybiBjb21wYWN0LmpvaW4o',
+    'IjsiKTsKfQoKYXN5bmMgZnVuY3Rpb24gcnVuRW5naW5lKHByb2dyYW0pIHsKICBpZiAoIWV4aXN0c1N5bmMoQklOQVJZX1BBVEgp',
+    'KSB7CiAgICB0aHJvdyBuZXcgRXJyb3IoCiAgICAgIGBFViBSYXN0ZXIgQ3JhZnRzIGVuZ2luZSBub3QgZm91bmQgYXQgJHtCSU5B',
+    'UllfUEFUSH0uIFJ1biAiY2FyZ28gYnVpbGQgLS1yZWxlYXNlIiBpbiB0aGUgcHJvamVjdCBmb2xkZXIgZmlyc3QuYAogICAgKTsK',
+    'ICB9CiAgdHJ5IHsKICAgIGNvbnN0IHsgc3Rkb3V0IH0gPSBhd2FpdCBleGVjRmlsZUFzeW5jKEJJTkFSWV9QQVRILCBbcHJvZ3Jh',
+    'bV0sIHsKICAgICAgbWF4QnVmZmVyOiA4ICogMTAyNCAqIDEwMjQsCiAgICAgIHdpbmRvd3NIaWRlOiB0cnVlLAogICAgICBlbmNv',
+    'ZGluZzogInV0ZjgiLAogICAgfSk7CiAgICByZXR1cm4gc3Rkb3V0OwogIH0gY2F0Y2ggKGVycm9yKSB7CiAgICBjb25zdCBkZXRh',
+    'aWwgPSAoZXJyb3Iuc3RkZXJyICYmIFN0cmluZyhlcnJvci5zdGRlcnIpLnRyaW0oKSkgfHwgZXJyb3IubWVzc2FnZTsKICAgIHRo',
+    'cm93IG5ldyBFcnJvcihkZXRhaWwpOwogIH0KfQoKZnVuY3Rpb24gdGV4dFJlc3VsdCh0ZXh0LCBpc0Vycm9yID0gZmFsc2UpIHsK',
+    'ICByZXR1cm4geyBjb250ZW50OiBbeyB0eXBlOiAidGV4dCIsIHRleHQgfV0sIC4uLihpc0Vycm9yID8geyBpc0Vycm9yOiB0cnVl',
+    'IH0gOiB7fSkgfTsKfQoKLyoqCiAqIFZhbGlkYXRlIGEgY29tbWFuZCBhZ2FpbnN0IHRoZSBlbmdpbmUgYnkgZHJ5LXJ1bm5pbmcg',
+    'aGlzdG9yeSArIGNvbW1hbmQuCiAqIE9ubHkgY29tbWFuZHMgdGhlIGVuZ2luZSBhY2NlcHRzIGFyZSBjb21taXR0ZWQgdG8gdGhl',
+    'IGJ1ZmZlcmVkIGhpc3RvcnkuCiAqLwphc3luYyBmdW5jdGlvbiBjb21taXQoY29tbWFuZCwgbWVzc2FnZSkgewogIHRyeSB7CiAg',
+    'ICBhd2FpdCBydW5FbmdpbmUoc2VyaWFsaXplSGlzdG9yeShbY29tbWFuZCwgInJlbmRlciJdKSk7CiAgfSBjYXRjaCAoZXJyb3Ip',
+    'IHsKICAgIHJldHVybiB0ZXh0UmVzdWx0KGBFViBSYXN0ZXIgQ3JhZnRzIHJlamVjdGVkIHRoZSBjb21tYW5kOiAke2Vycm9yLm1l',
+    'c3NhZ2V9YCwgdHJ1ZSk7CiAgfQogIGhpc3RvcnkucHVzaChjb21tYW5kKTsKICByZXR1cm4gdGV4dFJlc3VsdChtZXNzYWdlKTsK',
+    'fQoKY29uc3QgY29vcmQgPSB6Lm51bWJlcigpLmludCgpLm1pbigwKS5tYXgoTUFYX0lOREVYKTsKY29uc3QgY29sb3JTY2hlbWEg',
+    'PSB6CiAgLnN0cmluZygpCiAgLnJlZ2V4KAogICAgL14oIz9bMC05YS1mQS1GXXszfXwjP1swLTlhLWZBLUZdezZ9fHdoaXRlfGJs',
+    'YWNrfHJlZHxibHVlfGdyZWVufHllbGxvd3xvcmFuZ2V8cHVycGxlfGJyb3duKSQvaSwKICAgICJVc2UgYSBoZXggY29sb3IgbGlr',
+    'ZSAjRkYwMDAwIG9yIGEgbmFtZTogd2hpdGUsIGJsYWNrLCByZWQsIGJsdWUsIGdyZWVuLCB5ZWxsb3csIG9yYW5nZSwgcHVycGxl',
+    'LCBicm93biIKICApOwoKY29uc3Qgc2VydmVyID0gbmV3IE1jcFNlcnZlcih7IG5hbWU6ICJldi1yYXN0ZXIiLCB2ZXJzaW9uOiAi',
+    'MC4xLjAiIH0pOwoKc2VydmVyLnRvb2woCiAgImV2X3Jhc3Rlcl9kcmF3X3BpeGVsIiwKICBgUGVuY2lsOiBwYWludCBvbmUgcGl4',
+    'ZWwgb24gdGhlICR7Q0FOVkFTX1NJWkV9eCR7Q0FOVkFTX1NJWkV9IGNhbnZhcyAoeCA9IGNvbHVtbiwgeSA9IHJvdywgb3JpZ2lu',
+    'IHRvcC1sZWZ0LCAwLSR7TUFYX0lOREVYfSkuIFRoZSBjb2xvciBiZWNvbWVzIHRoZSBwcmltYXJ5IGNvbG9yLmAsCiAgeyB4OiBj',
+    'b29yZCwgeTogY29vcmQsIGNvbG9yOiBjb2xvclNjaGVtYSB9LAogIGFzeW5jICh7IHgsIHksIGNvbG9yIH0pID0+IGNvbW1pdChg',
+    'cGl4ZWw6JHt4fSwke3l9LCR7Y29sb3J9YCwgYFBpeGVsICgke3h9LCAke3l9KSBzZXQgdG8gJHtjb2xvcn0uYCkKKTsKCnNlcnZl',
+    'ci50b29sKAogICJldl9yYXN0ZXJfZmxvb2RfZmlsbCIsCiAgIkZpbGwgYnVja2V0OiBmbG9vZC1maWxsICg0LXdheSkgdGhlIGNv',
+    'bm5lY3RlZCByZWdpb24gY29udGFpbmluZyAoeCwgeSkgd2l0aCBhIGNvbG9yLiIsCiAgeyB4OiBjb29yZCwgeTogY29vcmQsIGNv',
+    'bG9yOiBjb2xvclNjaGVtYSB9LAogIGFzeW5jICh7IHgsIHksIGNvbG9yIH0pID0+IGNvbW1pdChgZmlsbDoke3h9LCR7eX0sJHtj',
+    'b2xvcn1gLCBgUmVnaW9uIGF0ICgke3h9LCAke3l9KSBmaWxsZWQgd2l0aCAke2NvbG9yfS5gKQopOwoKc2VydmVyLnRvb2woCiAg',
+    'ImV2X3Jhc3Rlcl90cmFuc2Zvcm0iLAogICJUcmFuc2Zvcm0gdGhlIHdob2xlIGNhbnZhczogcm90YXRlXzkwIChyb3RhdGUgcmln',
+    'aHQgOTApLCByb3RhdGVfMTgwLCByb3RhdGVfMjcwIChyb3RhdGUgbGVmdCA5MCksIGZsaXBfaG9yaXpvbnRhbCwgZmxpcF92ZXJ0',
+    'aWNhbC4iLAogIHsKICAgIG9wZXJhdGlvbjogei5lbnVtKFsicm90YXRlXzkwIiwgInJvdGF0ZV8xODAiLCAicm90YXRlXzI3MCIs',
+    'ICJmbGlwX2hvcml6b250YWwiLCAiZmxpcF92ZXJ0aWNhbCJdKSwKICB9LAogIGFzeW5jICh7IG9wZXJhdGlvbiB9KSA9PiB7CiAg',
+    'ICBjb25zdCBjb21tYW5kcyA9IHsKICAgICAgcm90YXRlXzkwOiAicm90YXRlOjkwIiwKICAgICAgcm90YXRlXzE4MDogInJvdGF0',
+    'ZToxODAiLAogICAgICByb3RhdGVfMjcwOiAicm90YXRlOjI3MCIsCiAgICAgIGZsaXBfaG9yaXpvbnRhbDogImZsaXA6aG9yaXpv',
+    'bnRhbCIsCiAgICAgIGZsaXBfdmVydGljYWw6ICJmbGlwOnZlcnRpY2FsIiwKICAgIH07CiAgICByZXR1cm4gY29tbWl0KGNvbW1h',
+    'bmRzW29wZXJhdGlvbl0sIGBBcHBsaWVkICR7b3BlcmF0aW9ufS5gKTsKICB9Cik7CgpzZXJ2ZXIudG9vbCgKICAiZXZfcmFzdGVy',
+    'X2RyYXdfbGluZSIsCiAgIkJydXNoOiBkcmF3IGEgY29udGludW91cyBzdHJva2UgYmV0d2VlbiB0d28gcG9pbnRzIChhbGwgY2Vs',
+    'bHMgaW4gYmV0d2VlbiBhcmUgcGFpbnRlZCkuIiwKICB7IHgwOiBjb29yZCwgeTA6IGNvb3JkLCB4MTogY29vcmQsIHkxOiBjb29y',
+    'ZCwgY29sb3I6IGNvbG9yU2NoZW1hIH0sCiAgYXN5bmMgKHsgeDAsIHkwLCB4MSwgeTEsIGNvbG9yIH0pID0+CiAgICBjb21taXQo',
+    'YGxpbmU6JHt4MH0sJHt5MH0sJHt4MX0sJHt5MX0sJHtjb2xvcn1gLCBgTGluZSAoJHt4MH0sICR7eTB9KSB0byAoJHt4MX0sICR7',
+    'eTF9KSBkcmF3biBpbiAke2NvbG9yfS5gKQopOwoKc2VydmVyLnRvb2woCiAgImV2X3Jhc3Rlcl9lcmFzZSIsCiAgIkVyYXNlcjog',
+    'b3ZlcndyaXRlIGEgcGl4ZWwgd2l0aCB0aGUgd2hpdGUgYmFja2dyb3VuZC4iLAogIHsgeDogY29vcmQsIHk6IGNvb3JkIH0sCiAg',
+    'YXN5bmMgKHsgeCwgeSB9KSA9PiBjb21taXQoYGVyYXNlOiR7eH0sJHt5fWAsIGBQaXhlbCAoJHt4fSwgJHt5fSkgZXJhc2VkLmAp',
+    'Cik7CgpzZXJ2ZXIudG9vbCgKICAiZXZfcmFzdGVyX3NldF9jb2xvciIsCiAgIlNldCB0aGUgcHJpbWFyeSBjb2xvciB3aXRob3V0',
+    'IGRyYXdpbmc7IGl0IGlzIGFkZGVkIHRvIHRoZSBwYWxldHRlIGhpc3RvcnkuIiwKICB7IGNvbG9yOiBjb2xvclNjaGVtYSB9LAog',
+    'IGFzeW5jICh7IGNvbG9yIH0pID0+IGNvbW1pdChgY29sb3I6JHtjb2xvcn1gLCBgUHJpbWFyeSBjb2xvciBzZXQgdG8gJHtjb2xv',
+    'cn0uYCkKKTsKCnNlcnZlci50b29sKAogICJldl9yYXN0ZXJfcmVzZXQiLAogICJTdGFydCBhIGZyZXNoIGJsYW5rIGNhbnZhcyBh',
+    'bmQgY2xlYXIgdGhlIGJ1ZmZlcmVkIHRvb2wgY2FsbCBoaXN0b3J5LiIsCiAge30sCiAgYXN5bmMgKCkgPT4gewogICAgcmVzZXRI',
+    'aXN0b3J5KCk7CiAgICByZXR1cm4gdGV4dFJlc3VsdCgiQ2FudmFzIHJlc2V0IHRvIGEgYmxhbmsgd2hpdGUgZ3JpZC4iKTsKICB9',
+    'Cik7CgpzZXJ2ZXIudG9vbCgKICAiZXZfcmFzdGVyX3ZpZXdfY2FudmFzIiwKICAiUmVuZGVyIHRoZSBjdXJyZW50IGNhbnZhcyBi',
+    'eSByZXBsYXlpbmcgdGhlIGJ1ZmZlcmVkIHRvb2wgY2FsbCBoaXN0b3J5IHRocm91Z2ggdGhlIG5hdGl2ZSBSdXN0IGVuZ2luZSwg',
+    'YW5kIHJldHVybiB0aGUgZW1vamkgZ3JpZC4iLAogIHt9LAogIGFzeW5jICgpID0+IHsKICAgIHRyeSB7CiAgICAgIGNvbnN0IG91',
+    'dHB1dCA9IGF3YWl0IHJ1bkVuZ2luZShzZXJpYWxpemVIaXN0b3J5KFsicmVuZGVyIl0pKTsKICAgICAgcmV0dXJuIHRleHRSZXN1',
+    'bHQob3V0cHV0KTsKICAgIH0gY2F0Y2ggKGVycm9yKSB7CiAgICAgIHJldHVybiB0ZXh0UmVzdWx0KGBSZW5kZXIgZmFpbGVkOiAk',
+    'e2Vycm9yLm1lc3NhZ2V9YCwgdHJ1ZSk7CiAgICB9CiAgfQopOwoKY29uc3QgdHJhbnNwb3J0ID0gbmV3IFN0ZGlvU2VydmVyVHJh',
+    'bnNwb3J0KCk7CmF3YWl0IHNlcnZlci5jb25uZWN0KHRyYW5zcG9ydCk7Cg=='
+  ]
+};
+const SETUP_CJS = String.raw`'use strict';
+// EV_Raster_Crafts_Setup.exe entry point.
+//   EV_Raster_Crafts_Setup.exe        -> installs EV Raster Crafts and registers it with Claude Desktop
+//   EV_Raster_Crafts_Setup.exe mcp    -> runs the MCP stdio server (this is what Claude Desktop launches)
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+function claudeConfigDirs() {
+  const home = os.homedir();
+  if (process.platform === 'win32') {
+    const dirs = [];
+    const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    dirs.push(path.join(roaming, 'Claude'));
+    // Microsoft Store installs keep their config in a virtualised package folder.
+    const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    const pkgRoot = path.join(local, 'Packages');
+    try {
+      for (const name of fs.readdirSync(pkgRoot)) {
+        if (name.startsWith('Claude_')) {
+          const store = path.join(pkgRoot, name, 'LocalCache', 'Roaming', 'Claude');
+          if (fs.existsSync(store)) dirs.push(store);
+        }
+      }
+    } catch (e) { /* no Packages folder */ }
+    return dirs;
+  }
+  if (process.platform === 'darwin') {
+    return [path.join(home, 'Library', 'Application Support', 'Claude')];
+  }
+  return [path.join(home, '.config', 'Claude')];
+}
+
+// Adds/updates one mcpServers entry and leaves every other setting untouched.
+function updateClaudeConfig(serverName, serverBlock) {
+  const results = [];
+  for (const dir of claudeConfigDirs()) {
+    const file = path.join(dir, 'claude_desktop_config.json');
+    let config = {};
+    if (fs.existsSync(file)) {
+      const raw = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+      if (raw.trim().length > 0) {
+        try {
+          config = JSON.parse(raw);
+        } catch (e) {
+          // Never overwrite a file we cannot parse.
+          results.push({ file: file, ok: false, reason: 'existing file is not valid JSON, left untouched' });
+          continue;
+        }
+      }
+      fs.copyFileSync(file, file + '.bak');
+    } else {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) config = {};
+    if (typeof config.mcpServers !== 'object' || config.mcpServers === null) config.mcpServers = {};
+    config.mcpServers[serverName] = serverBlock;
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', 'utf8');
+    results.push({ file: file, ok: true });
+  }
+  return results;
+}
+
+function pause() {
+  return new Promise(function (resolve) {
+    if (!process.stdin.isTTY) return resolve();
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    rl.question('\nPress Enter to close...', function () { rl.close(); resolve(); });
+  });
+}
+
+async function install() {
+  console.log('EV Raster Crafts Setup (EVORA)\n');
+  if (process.platform !== 'win32') {
+    console.log('This installer is intended for Windows.');
+    return;
+  }
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const installDir = path.join(base, 'EV Raster Crafts');
+  fs.mkdirSync(installDir, { recursive: true });
+
+  const engineDest = path.join(installDir, 'ev-raster.exe');
+  const bridgeDest = path.join(installDir, 'ev-raster-mcp.exe');
+
+  // Files inside the packaged snapshot must be read, then written out as real files.
+  fs.writeFileSync(engineDest, fs.readFileSync(path.join(__dirname, 'ev-raster.exe')));
+  console.log('Installed engine : ' + engineDest);
+
+  if (path.resolve(process.execPath).toLowerCase() !== path.resolve(bridgeDest).toLowerCase()) {
+    fs.writeFileSync(bridgeDest, fs.readFileSync(process.execPath));
+  }
+  console.log('Installed bridge : ' + bridgeDest);
+
+  const results = updateClaudeConfig('ev_raster_crafts', {
+    command: bridgeDest,
+    args: ['mcp'],
+    env: { EV_RASTER_BIN: engineDest, EV_RASTER_SIZE: '16' }
+  });
+  for (const r of results) {
+    console.log(r.ok ? 'Registered with Claude Desktop: ' + r.file : 'Skipped ' + r.file + ' (' + r.reason + ')');
+  }
+  console.log('\nDone. Fully quit and restart Claude Desktop, then ask:');
+  console.log('  "Use EV Raster Crafts to draw a red heart on a blue background and show the canvas."');
+  await pause();
+}
+
+module.exports = { updateClaudeConfig: updateClaudeConfig, claudeConfigDirs: claudeConfigDirs };
+
+if (require.main === module) {
+  if (process.argv.slice(2).indexOf('mcp') !== -1) {
+    require('./bridge.cjs');
+  } else {
+    install().catch(function (err) {
+      console.error('Install failed: ' + (err && err.message ? err.message : err));
+      pause().then(function () { process.exit(1); });
+    });
+  }
+}
+`;
+
+const b64 = (name) => Buffer.from(FILES[name].join(''), 'base64').toString('utf8');
+const log = (m) => console.log('\n=== ' + m + ' ===');
+const q = (p) => '"' + p + '"';
+
+function run(cmd, cwd) {
+  console.log('> ' + cmd + '   (in ' + path.relative(ROOT, cwd) || '.' + ')');
+  execSync(cmd, { cwd, stdio: 'inherit' });
+}
+function has(cmd) {
+  const r = spawnSync(cmd, ['--version'], { shell: true, encoding: 'utf8' });
+  return r.status === 0 ? String(r.stdout).trim().split('\n')[0] : null;
+}
+function write(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content, 'utf8');
+  console.log('wrote ' + path.relative(ROOT, file));
+}
+
+async function main() {
+  // 1. TARGET INITIALIZATION
+  log('1/5 Checking tools and creating folders');
+  const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+  if (nodeMajor < 18) throw new Error('Node 18+ required (found ' + process.version + ').');
+  const cargoV = has('cargo');
+  const npmV = has('npm');
+  if (!cargoV) throw new Error('cargo not found. Install Rust from https://rustup.rs, reopen the terminal, and re-run.');
+  if (!npmV) throw new Error('npm not found. Install Node.js from https://nodejs.org and re-run.');
+  console.log('node ' + process.version + ' | npm ' + npmV + ' | ' + cargoV);
+  [CORE, path.join(CORE, 'src'), BRIDGE, PKGDIR, DIST].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+
+  // 2. RAW CODE INJECTION
+  log('2/5 Writing project sources');
+  write(path.join(CORE, 'Cargo.toml'), b64('Cargo.toml'));
+  write(path.join(CORE, 'src', 'main.rs'), b64('src/main.rs'));
+  write(path.join(BRIDGE, 'package.json'), b64('package.json'));
+  write(path.join(BRIDGE, 'index.js'), b64('index.js'));
+
+  // 3. COMPILATION RUNTIME
+  log('3/5 Compiling Rust engine and installing MCP dependencies');
+  run('cargo build --release', CORE);
+  const engine = path.join(CORE, 'target', 'release', ENGINE_NAME);
+  if (!fs.existsSync(engine)) throw new Error('Engine binary missing after build: ' + engine);
+  const smoke = spawnSync(engine, ['color:red;line:0,0,3,3;render'], { encoding: 'utf8' });
+  if (smoke.status !== 0) throw new Error('Engine smoke test failed: ' + smoke.stderr);
+  console.log('engine smoke test OK');
+  run('npm install --no-audit --no-fund', BRIDGE);
+
+  // 4. WIN32 INSTALLER PACKAGING
+  log('4/5 Packaging EV_Raster_Crafts_Setup.exe');
+  if (!IS_WIN) {
+    console.log('Not running on Windows: the Windows engine binary cannot be built here, so the .exe step is skipped.');
+    console.log('Run this script on a Windows machine to produce dist/EV_Raster_Crafts_Setup.exe.');
+  } else {
+    // 4a. Bundle the ESM bridge into one CommonJS file (pkg cannot load ESM / top-level await).
+    let src = b64('index.js');
+    const tla = 'await server.connect(transport);';
+    const dirLine = 'const __dirname = dirname(fileURLToPath(import.meta.url));';
+    if (!src.includes(tla) || !src.includes(dirLine)) throw new Error('index.js changed shape; cannot auto-transform for bundling.');
+    src = src.replace(tla, '(async () => { await server.connect(transport); })();');
+    src = src.replace(dirLine, 'const __dirname = dirname(process.execPath);');
+    write(path.join(BRIDGE, 'index.bundle-src.js'), src);
+
+    write(path.join(PKGDIR, 'setup.cjs'), SETUP_CJS);
+    write(path.join(PKGDIR, 'package.json'), JSON.stringify({
+      name: 'ev-raster-setup', version: '0.1.0', private: true, bin: 'setup.cjs',
+      pkg: { scripts: ['bridge.cjs'], assets: ['ev-raster.exe'], targets: ['node20-win-x64'] }
+    }, null, 2));
+    run('npm install --no-audit --no-fund esbuild @yao-pkg/pkg', PKGDIR);
+
+    const esbuild = require(path.join(PKGDIR, 'node_modules', 'esbuild'));
+    esbuild.buildSync({
+      entryPoints: [path.join(BRIDGE, 'index.bundle-src.js')],
+      bundle: true, platform: 'node', format: 'cjs', target: 'node20',
+      outfile: path.join(PKGDIR, 'bridge.cjs'), logLevel: 'warning'
+    });
+    console.log('bundled bridge.cjs');
+    fs.copyFileSync(engine, path.join(PKGDIR, 'ev-raster.exe'));
+
+    const out = path.join(DIST, 'EV_Raster_Crafts_Setup.exe');
+    run('npx --no-install pkg . --targets node20-win-x64 --output ' + q(out), PKGDIR);
+    if (!fs.existsSync(out)) throw new Error('pkg did not produce ' + out);
+    console.log('built ' + out + ' (' + Math.round(fs.statSync(out).size / 1048576) + ' MB)');
+  }
+
+  // 5. CLAUDE DESKTOP CONFIG AUTOMATION (points at this local build; Setup.exe does the same on other PCs)
+  log('5/5 Registering with Claude Desktop');
+  write(path.join(PKGDIR, 'setup.cjs'), SETUP_CJS);
+  const { updateClaudeConfig } = require(path.join(PKGDIR, 'setup.cjs'));
+  const results = updateClaudeConfig('ev_raster_crafts', {
+    command: 'node',
+    args: [path.join(BRIDGE, 'index.js')],
+    env: { EV_RASTER_BIN: engine, EV_RASTER_SIZE: '16' }
+  });
+  results.forEach((r) => console.log(r.ok ? 'updated ' + r.file + ' (backup: .bak)' : 'skipped ' + r.file + ': ' + r.reason));
+
+  console.log('\nAll done.');
+  if (IS_WIN) console.log('Installer for other PCs: ' + path.join(DIST, 'EV_Raster_Crafts_Setup.exe'));
+  console.log('Fully quit and restart Claude Desktop to load the "ev_raster_crafts" server.');
+}
+
+main().catch((e) => { console.error('\nBUILD FAILED: ' + e.message); process.exit(1); });
