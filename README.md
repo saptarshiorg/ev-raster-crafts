@@ -8,3 +8,7 @@ GitHub Actions builds `EV_Raster_Crafts_Setup.exe` on a Windows runner.
 - Push a tag like `v0.1.0` to also publish the .exe on the Releases page.
 
 Local build: `node build-installer.js` (needs Node 18+, Rust).
+
+## Contents
+- `build-installer.js` builds everything and embeds the sources below (regenerate it if you edit them).
+- `source/` holds the readable sources: `src/bin/paint.rs` (the egui Paint app, `ev-raster-paint.exe`), `src/main.rs` (CLI engine used by Claude), `index.js` (MCP bridge).

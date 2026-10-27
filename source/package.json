@@ -1,0 +1,17 @@
+{
+  "name": "ev-raster-mcp",
+  "version": "0.1.0",
+  "description": "EV Raster Crafts by EVORA: MCP stdio bridge for the native Rust raster canvas engine",
+  "author": "EVORA",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "scripts": {
+    "build": "cargo build --release",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.8"
+  }
+}

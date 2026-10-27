@@ -1,0 +1,29 @@
+[package]
+name = "ev-raster"
+version = "0.1.0"
+edition = "2021"
+description = "EV Raster Crafts by EVORA: native Rust raster canvas engine and Paint-style editor"
+authors = ["EVORA"]
+license = "MIT"
+default-run = "ev-raster"
+
+[[bin]]
+name = "ev-raster"
+path = "src/main.rs"
+
+[[bin]]
+name = "ev-raster-paint"
+path = "src/bin/paint.rs"
+
+[dependencies]
+eframe = "0.29"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif"] }
+rfd = "0.15"
+ab_glyph = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
